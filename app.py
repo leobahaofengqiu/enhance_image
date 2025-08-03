@@ -1,17 +1,18 @@
 import os
 import shutil
 import uuid
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from gradio_client import Client, handle_file
 from dotenv import load_dotenv
+import requests
 
-# Load environment variables from .env (optional for local testing)
+# Load environment variables from .env
 load_dotenv()
 
 app = FastAPI()
 
-# CORS settings (allow all origins for Flutter app)
+# Allow all CORS origins (adjust for production if needed)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,23 +22,30 @@ app.add_middleware(
 
 @app.post("/enhance/")
 async def enhance_image(file: UploadFile = File(...)):
+    # Generate unique filenames
+    temp_input_filename = f"temp_input_{uuid.uuid4().hex}"
+    temp_output_filename = f"temp_output_{uuid.uuid4().hex}.png"
+
     try:
-        # Save uploaded file to a temp file
-        temp_filename = f"temp_{uuid.uuid4().hex}.png"
-        with open(temp_filename, "wb") as buffer:
+        # Get original extension (e.g., .jpg, .png)
+        input_ext = os.path.splitext(file.filename)[-1].lower()
+        input_path = temp_input_filename + input_ext
+
+        # Save uploaded file
+        with open(input_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # Get Hugging Face API Token from env
+        # Get Hugging Face token
         HF_TOKEN = os.getenv("HF_TOKEN")
         if not HF_TOKEN:
-            raise HTTPException(status_code=500, detail="HF_TOKEN not set")
+            raise HTTPException(status_code=500, detail="HF_TOKEN not set in environment")
 
-        # Create Hugging Face client
+        # Hugging Face Gradio Client
         client = Client("gokaygokay/Tile-Upscaler", hf_token=HF_TOKEN)
 
         # Call the model
-        result = client.predict(
-            param_0=handle_file(temp_filename),
+        result_url = client.predict(
+            param_0=handle_file(input_path),
             param_1=512,   # Resolution
             param_2=20,    # Inference steps
             param_3=0.4,   # Strength
@@ -46,11 +54,24 @@ async def enhance_image(file: UploadFile = File(...)):
             api_name="/wrapper"
         )
 
-        return {"enhanced_url": result}
+        # Download the result image from the URL
+        response = requests.get(result_url)
+        if response.status_code != 200:
+            raise HTTPException(status_code=500, detail="Failed to download enhanced image")
+
+        # Save result to temp file
+        with open(temp_output_filename, "wb") as f:
+            f.write(response.content)
+
+        # Return the image as response
+        with open(temp_output_filename, "rb") as f:
+            return Response(content=f.read(), media_type="image/png")
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
     finally:
-        if os.path.exists(temp_filename):
-            os.remove(temp_filename)
+        # Clean up all temp files
+        for path in [input_path, temp_output_filename]:
+            if os.path.exists(path):
+                os.remove(path)
