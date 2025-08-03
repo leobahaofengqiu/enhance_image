@@ -3,3 +3,5 @@ uvicorn
 gradio_client
 python-multipart
 python-dotenv
+Pillow
+requests
