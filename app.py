@@ -61,17 +61,25 @@ async def enhance_image(file: UploadFile = File(...)):
         client = Client("gokaygokay/Tile-Upscaler", hf_token=HF_TOKEN)
 
         try:
-            result_url = client.predict(
+            result_urls = client.predict(
                 param_0=handle_file(input_path),
                 param_1=512,   # Resolution
                 param_2=20,    # Inference steps
-                param_3=0.4,   # Strength
+                param_3=0.07,   # Strength
                 param_4=0,     # HDR effect
                 param_5=3,     # Guidance scale
                 api_name="/wrapper"
             )
         except Exception as model_error:
             raise HTTPException(status_code=500, detail=f"Gradio API call failed: {model_error}")
+
+        # Handle result: could be list or str
+        if isinstance(result_urls, list):
+            result_url = result_urls[0]  # Use first result
+        else:
+            result_url = result_urls
+
+        logging.info(f"Downloading result from: {result_url}")
 
         # Download enhanced image
         response = requests.get(result_url)
@@ -87,6 +95,7 @@ async def enhance_image(file: UploadFile = File(...)):
             return Response(content=f.read(), media_type="image/png")
 
     except Exception as e:
+        logging.error(f"Enhancement failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
     finally:
