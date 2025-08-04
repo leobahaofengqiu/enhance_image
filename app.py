@@ -1,14 +1,18 @@
 import os
 import shutil
 import uuid
+import logging
+import requests
 from fastapi import FastAPI, File, UploadFile, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from gradio_client import Client, handle_file
 from dotenv import load_dotenv
-import requests
 
 # Load environment variables from .env
 load_dotenv()
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 
 app = FastAPI()
 
@@ -20,50 +24,65 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Allowed image extensions
+ALLOWED_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp"]
+
+@app.get("/")
+def root():
+    return {"message": "Image Enhancer API is running"}
+
 @app.post("/enhance/")
 async def enhance_image(file: UploadFile = File(...)):
     # Generate unique filenames
     temp_input_filename = f"temp_input_{uuid.uuid4().hex}"
     temp_output_filename = f"temp_output_{uuid.uuid4().hex}.png"
 
-    try:
-        # Get original extension (e.g., .jpg, .png)
-        input_ext = os.path.splitext(file.filename)[-1].lower()
-        input_path = temp_input_filename + input_ext
+    # Get original extension (e.g., .jpg, .png)
+    input_ext = os.path.splitext(file.filename)[-1].lower()
+    input_path = temp_input_filename + input_ext
 
-        # Save uploaded file
+    # Validate extension
+    if input_ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Unsupported file type")
+
+    try:
+        # Save uploaded file to disk
         with open(input_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
+
+        logging.info(f"File saved: {input_path}")
 
         # Get Hugging Face token
         HF_TOKEN = os.getenv("HF_TOKEN")
         if not HF_TOKEN:
             raise HTTPException(status_code=500, detail="HF_TOKEN not set in environment")
 
-        # Hugging Face Gradio Client
+        # Initialize Gradio client
         client = Client("gokaygokay/Tile-Upscaler", hf_token=HF_TOKEN)
 
-        # Call the model
-        result_url = client.predict(
-            param_0=handle_file(input_path),
-            param_1=512,   # Resolution
-            param_2=20,    # Inference steps
-            param_3=0.4,   # Strength
-            param_4=0,     # HDR effect
-            param_5=3,     # Guidance scale
-            api_name="/wrapper"
-        )
+        try:
+            result_url = client.predict(
+                param_0=handle_file(input_path),
+                param_1=512,   # Resolution
+                param_2=20,    # Inference steps
+                param_3=0.4,   # Strength
+                param_4=0,     # HDR effect
+                param_5=3,     # Guidance scale
+                api_name="/wrapper"
+            )
+        except Exception as model_error:
+            raise HTTPException(status_code=500, detail=f"Gradio API call failed: {model_error}")
 
-        # Download the result image from the URL
+        # Download enhanced image
         response = requests.get(result_url)
         if response.status_code != 200:
             raise HTTPException(status_code=500, detail="Failed to download enhanced image")
 
-        # Save result to temp file
+        # Save result
         with open(temp_output_filename, "wb") as f:
             f.write(response.content)
 
-        # Return the image as response
+        # Return image as response
         with open(temp_output_filename, "rb") as f:
             return Response(content=f.read(), media_type="image/png")
 
