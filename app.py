@@ -1,14 +1,14 @@
 import os
 import shutil
 import uuid
+import base64
 import logging
 import requests
 from fastapi import FastAPI, File, UploadFile, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
-from gradio_client import Client, handle_file
 from dotenv import load_dotenv
 
-# Load .env variables (e.g., HF_TOKEN)
+# Load .env variables
 load_dotenv()
 
 # Enable logging
@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO)
 
 app = FastAPI()
 
-# CORS for frontend access
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -33,7 +33,6 @@ def root():
 
 @app.post("/enhance/")
 async def enhance_image(file: UploadFile = File(...)):
-    # Validate and prepare temp filenames
     ext = os.path.splitext(file.filename)[-1].lower()
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Unsupported file type")
@@ -42,54 +41,46 @@ async def enhance_image(file: UploadFile = File(...)):
     output_filename = f"temp_output_{uuid.uuid4().hex}.png"
 
     try:
-        # Save uploaded image locally
+        # Save the uploaded file
         with open(input_filename, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
+
         logging.info(f"Uploaded file saved as: {input_filename}")
 
-        # Load Hugging Face token
-        HF_TOKEN = os.getenv("HF_TOKEN")
-        if not HF_TOKEN:
-            raise HTTPException(status_code=500, detail="HF_TOKEN not set in environment")
+        # Convert image to base64
+        with open(input_filename, "rb") as f:
+            encoded_image = base64.b64encode(f.read()).decode("utf-8")
+        base64_url = f"data:image/{ext[1:]};base64,{encoded_image}"
 
-        # Initialize Gradio Client
-        client = Client("smartfeed/image_hd", hf_token=HF_TOKEN)
+        # Payload for POST request
+        payload = {
+            "data": [
+                base64_url,       # Input image in base64 URL
+                "Version 1",      # Default version; change if needed
+                2.0               # Rescaling factor
+            ]
+        }
 
-        # Submit job to model queue
-        logging.info("Submitting job to model...")
-        job = client.submit(
-            input_image=handle_file(input_filename),
-            scale=2,
-            enhance_mode="Face Enhance + Image Enhance",
-            api_name="/enhance_image"
-        )
+        # Call the HF Space API directly
+        api_url = "https://rakibulbd030-old-photo-restoration.hf.space/api/predict"
+        response = requests.post(api_url, json=payload)
+        response.raise_for_status()
 
-        # Wait for result (timeout after 5 min)
-        result = job.result(timeout=300)
-        logging.info("Received result from model.")
+        output_data = response.json().get("data")
+        if not output_data or not isinstance(output_data, list):
+            raise Exception("Unexpected response structure")
 
-        # Expecting a list/tuple with at least 2 values
-        if not isinstance(result, (list, tuple)) or len(result) < 2:
-            raise HTTPException(status_code=500, detail="Invalid response from model")
+        output_base64_url = output_data[0]  # Base64 output image
 
-        enhanced_image_path = result[1]
+        # Decode base64 image
+        base64_data = output_base64_url.split(",", 1)[1]
+        image_bytes = base64.b64decode(base64_data)
 
-        # Build absolute URL if path is relative
-        if enhanced_image_path.startswith("/"):
-            enhanced_image_url = f"https://smartfeed-image-hd.hf.space/file={enhanced_image_path}"
-        else:
-            enhanced_image_url = enhanced_image_path
-
-        logging.info(f"Downloading from: {enhanced_image_url}")
-        response = requests.get(enhanced_image_url)
-        if response.status_code != 200:
-            raise HTTPException(status_code=500, detail="Failed to download enhanced image")
-
-        # Save final image
+        # Save output image
         with open(output_filename, "wb") as f:
-            f.write(response.content)
+            f.write(image_bytes)
 
-        # Return image as binary response
+        # Return image
         with open(output_filename, "rb") as f:
             return Response(content=f.read(), media_type="image/png")
 
@@ -98,7 +89,7 @@ async def enhance_image(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
     finally:
-        # Cleanup temporary files
+        # Cleanup
         for path in [input_filename, output_filename]:
             if os.path.exists(path):
                 os.remove(path)
