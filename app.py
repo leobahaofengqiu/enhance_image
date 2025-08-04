@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO)
 
 app = FastAPI()
 
-# Allow all CORS origins (adjust in production)
+# Allow all CORS origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,7 +24,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Allowed image extensions
 ALLOWED_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp"]
 
 @app.get("/")
@@ -43,45 +42,33 @@ async def enhance_image(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="Unsupported file type")
 
     try:
-        # Save uploaded image
+        # Save uploaded image to disk
         with open(input_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
+        logging.info(f"Uploaded file saved: {input_path}")
 
-        logging.info(f"File saved: {input_path}")
-
+        # Load HF token
         HF_TOKEN = os.getenv("HF_TOKEN")
         if not HF_TOKEN:
             raise HTTPException(status_code=500, detail="HF_TOKEN not set in environment")
 
-        # Connect to Hugging Face Gradio client
-        client = Client("gokaygokay/Tile-Upscaler", hf_token=HF_TOKEN)
+        # Connect to smartfeed/image_hd Gradio client
+        client = Client("smartfeed/image_hd", hf_token=HF_TOKEN)
 
         try:
-            result_urls = client.predict(
-                param_0=handle_file(input_path),
-                param_1=512,
-                param_2=20,
-                param_3=0.07,
-                param_4=0,
-                param_5=3,
-                api_name="/wrapper"
+            # Run enhancement
+            result_url = client.predict(
+                input_image=handle_file(input_path),
+                scale=4,
+                enhance_mode="Face Enhance + Image Enhance",
+                api_name="/enhance_image"
             )
         except Exception as model_error:
             raise HTTPException(status_code=500, detail=f"Gradio API call failed: {model_error}")
 
-        # Get result URL
-        if isinstance(result_urls, list):
-            result_url = result_urls[0]
-        else:
-            result_url = result_urls
+        logging.info(f"Result URL: {result_url}")
 
-        # Fix: if result_url is a local path, prepend full URL
-        if result_url.startswith("/"):
-            result_url = f"https://gokaygokay-tile-upscaler.hf.space/file={result_url}"
-        
-        logging.info(f"Downloading result from: {result_url}")
-
-        # Download enhanced image
+        # Download enhanced image from URL
         response = requests.get(result_url)
         if response.status_code != 200:
             raise HTTPException(status_code=500, detail="Failed to download enhanced image")
@@ -89,7 +76,7 @@ async def enhance_image(file: UploadFile = File(...)):
         with open(temp_output_filename, "wb") as f:
             f.write(response.content)
 
-        # Send back the image
+        # Return image to client
         with open(temp_output_filename, "rb") as f:
             return Response(content=f.read(), media_type="image/png")
 
@@ -98,7 +85,7 @@ async def enhance_image(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
     finally:
-        # Clean up
+        # Clean up temp files
         for path in [input_path, temp_output_filename]:
             if os.path.exists(path):
                 os.remove(path)
