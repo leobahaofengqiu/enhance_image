@@ -8,15 +8,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from gradio_client import Client, handle_file
 from dotenv import load_dotenv
 
-# Load environment variables from .env
+# Load .env variables (e.g., HF_TOKEN)
 load_dotenv()
 
-# Configure logging
+# Enable logging
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI()
 
-# Enable CORS for all origins (for frontend access)
+# CORS for frontend access
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,7 +24,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Allowed image formats
+# Allowed image types
 ALLOWED_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp"]
 
 @app.get("/")
@@ -33,7 +33,7 @@ def root():
 
 @app.post("/enhance/")
 async def enhance_image(file: UploadFile = File(...)):
-    # Generate temporary filenames
+    # Validate and prepare temp filenames
     ext = os.path.splitext(file.filename)[-1].lower()
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Unsupported file type")
@@ -42,7 +42,7 @@ async def enhance_image(file: UploadFile = File(...)):
     output_filename = f"temp_output_{uuid.uuid4().hex}.png"
 
     try:
-        # Save the uploaded image to disk
+        # Save uploaded image locally
         with open(input_filename, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         logging.info(f"Uploaded file saved as: {input_filename}")
@@ -52,52 +52,53 @@ async def enhance_image(file: UploadFile = File(...)):
         if not HF_TOKEN:
             raise HTTPException(status_code=500, detail="HF_TOKEN not set in environment")
 
-        # Connect to Hugging Face Gradio model
+        # Initialize Gradio Client
         client = Client("smartfeed/image_hd", hf_token=HF_TOKEN)
 
-        # Run prediction
-        try:
-            result = client.predict(
-                input_image=handle_file(input_filename),
-                scale=2,
-                enhance_mode="Face Enhance + Image Enhance",
-                api_name="/enhance_image"
-            )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Model API failed: {e}")
+        # Submit job to model queue
+        logging.info("Submitting job to model...")
+        job = client.submit(
+            input_image=handle_file(input_filename),
+            scale=2,
+            enhance_mode="Face Enhance + Image Enhance",
+            api_name="/enhance_image"
+        )
 
-        # Validate model response
+        # Wait for result (timeout after 5 min)
+        result = job.result(timeout=300)
+        logging.info("Received result from model.")
+
+        # Expecting a list/tuple with at least 2 values
         if not isinstance(result, (list, tuple)) or len(result) < 2:
             raise HTTPException(status_code=500, detail="Invalid response from model")
 
         enhanced_image_path = result[1]
 
-        # Convert relative path to full URL
+        # Build absolute URL if path is relative
         if enhanced_image_path.startswith("/"):
             enhanced_image_url = f"https://smartfeed-image-hd.hf.space/file={enhanced_image_path}"
         else:
             enhanced_image_url = enhanced_image_path
 
-        logging.info(f"Downloading enhanced image from: {enhanced_image_url}")
+        logging.info(f"Downloading from: {enhanced_image_url}")
+        response = requests.get(enhanced_image_url)
+        if response.status_code != 200:
+            raise HTTPException(status_code=500, detail="Failed to download enhanced image")
 
-        # Download the enhanced image
-        img_response = requests.get(enhanced_image_url)
-        if img_response.status_code != 200:
-            raise HTTPException(status_code=500, detail="Failed to fetch enhanced image")
+        # Save final image
+        with open(output_filename, "wb") as f:
+            f.write(response.content)
 
-        with open(output_filename, "wb") as out:
-            out.write(img_response.content)
+        # Return image as binary response
+        with open(output_filename, "rb") as f:
+            return Response(content=f.read(), media_type="image/png")
 
-        # Read and return enhanced image to frontend
-        with open(output_filename, "rb") as final_image:
-            return Response(content=final_image.read(), media_type="image/png")
-
-    except Exception as err:
-        logging.error(f"Processing failed: {err}")
-        raise HTTPException(status_code=500, detail=str(err))
+    except Exception as e:
+        logging.error(f"Enhancement failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
     finally:
-        # Always clean up temp files
+        # Cleanup temporary files
         for path in [input_filename, output_filename]:
             if os.path.exists(path):
                 os.remove(path)
