@@ -56,27 +56,40 @@ async def enhance_image(file: UploadFile = File(...)):
         client = Client("smartfeed/image_hd", hf_token=HF_TOKEN)
 
         try:
-            # Run enhancement
-            result_url = client.predict(
+            # Call the model
+            result_tuple = client.predict(
                 input_image=handle_file(input_path),
-                scale=4,
+                scale=2,
                 enhance_mode="Face Enhance + Image Enhance",
                 api_name="/enhance_image"
             )
         except Exception as model_error:
             raise HTTPException(status_code=500, detail=f"Gradio API call failed: {model_error}")
 
-        logging.info(f"Result URL: {result_url}")
+        # Ensure result is tuple or list
+        if not isinstance(result_tuple, (tuple, list)) or len(result_tuple) < 2:
+            raise HTTPException(status_code=500, detail="Unexpected result format from Gradio API")
 
-        # Download enhanced image from URL
-        response = requests.get(result_url)
+        # Extract enhanced image URL (second element)
+        enhanced_image_path = result_tuple[1]
+
+        # Build full URL if relative path
+        if enhanced_image_path.startswith("/"):
+            enhanced_image_url = f"https://smartfeed-image-hd.hf.space/file={enhanced_image_path}"
+        else:
+            enhanced_image_url = enhanced_image_path
+
+        logging.info(f"Downloading enhanced image from: {enhanced_image_url}")
+
+        # Download enhanced image
+        response = requests.get(enhanced_image_url)
         if response.status_code != 200:
             raise HTTPException(status_code=500, detail="Failed to download enhanced image")
 
         with open(temp_output_filename, "wb") as f:
             f.write(response.content)
 
-        # Return image to client
+        # Return image as response
         with open(temp_output_filename, "rb") as f:
             return Response(content=f.read(), media_type="image/png")
 
@@ -85,7 +98,7 @@ async def enhance_image(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
     finally:
-        # Clean up temp files
+        # Clean up
         for path in [input_path, temp_output_filename]:
             if os.path.exists(path):
                 os.remove(path)
