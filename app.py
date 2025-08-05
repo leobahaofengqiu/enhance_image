@@ -2,6 +2,7 @@ import os
 import uuid
 import shutil
 import logging
+import requests
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
@@ -27,18 +28,21 @@ app.add_middleware(
 # Allowed image extensions
 ALLOWED_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp"]
 
-# Initialize Gradio client
-client = Client("smartfeed/image_hd")
+# Initialize Gradio client for CodeFormer
+client = Client("sczhou/CodeFormer")
 
 @app.get("/")
 def root():
-    return {"message": "Image Enhancer API is running"}
+    return {"message": "CodeFormer Image Enhancement API is running"}
 
 @app.post("/enhance/")
 async def enhance_image(
     file: UploadFile = File(...),
-    scale: float = Form(2),
-    enhance_mode: str = Form("Face Enhance + Image Enhance")  # Options: Only Face Enhance, Only Image Enhance, Face Enhance + Image Enhance
+    upscale: float = Form(2),
+    codeformer_fidelity: float = Form(0.5),
+    face_align: bool = Form(True),
+    background_enhance: bool = Form(True),
+    face_upsample: bool = Form(True),
 ):
     ext = os.path.splitext(file.filename)[-1].lower()
     if ext not in ALLOWED_EXTENSIONS:
@@ -52,23 +56,30 @@ async def enhance_image(
             shutil.copyfileobj(file.file, buffer)
         logging.info(f"Image saved at: {input_path}")
 
-        # Use gradio_client to enhance image
+        # Use CodeFormer Gradio client to enhance image
         result = client.predict(
-            input_image=handle_file(input_path),
-            scale=scale,
-            enhance_mode=enhance_mode,
-            api_name="/enhance_image"
+            image=handle_file(input_path),
+            face_align=face_align,
+            background_enhance=background_enhance,
+            face_upsample=face_upsample,
+            upscale=upscale,
+            codeformer_fidelity=codeformer_fidelity,
+            api_name="/predict"
         )
 
-        output_url = result[0].get("url")
-        if not output_url:
-            raise Exception("No output image returned from API.")
+        # result is a filepath (local or URL), fetch the content
+        if not result:
+            raise Exception("No output returned from CodeFormer API.")
 
-        # Fetch the enhanced image from URL
-        response = requests.get(output_url)
-        response.raise_for_status()
+        if result.startswith("http"):
+            response = requests.get(result)
+            response.raise_for_status()
+            content = response.content
+        else:
+            with open(result, "rb") as f:
+                content = f.read()
 
-        return Response(content=response.content, media_type="image/png")
+        return Response(content=content, media_type="image/png")
 
     except Exception as e:
         logging.error(f"Enhancement failed: {e}")
