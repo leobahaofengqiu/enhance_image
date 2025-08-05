@@ -1,11 +1,11 @@
 import os
-import shutil
 import uuid
+import shutil
 import logging
-import requests
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+from gradio_client import Client, handle_file
 
 # Load environment variables
 load_dotenv()
@@ -27,6 +27,9 @@ app.add_middleware(
 # Allowed image extensions
 ALLOWED_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp"]
 
+# Initialize Gradio client
+client = Client("smartfeed/image_hd")
+
 @app.get("/")
 def root():
     return {"message": "Image Enhancer API is running"}
@@ -34,8 +37,8 @@ def root():
 @app.post("/enhance/")
 async def enhance_image(
     file: UploadFile = File(...),
-    version: str = Form("v1.4"),
-    scale: float = Form(20)
+    scale: float = Form(2),
+    enhance_mode: str = Form("Face Enhance + Image Enhance")  # Options: Only Face Enhance, Only Image Enhance, Face Enhance + Image Enhance
 ):
     ext = os.path.splitext(file.filename)[-1].lower()
     if ext not in ALLOWED_EXTENSIONS:
@@ -44,42 +47,34 @@ async def enhance_image(
     input_path = f"temp_input_{uuid.uuid4().hex}{ext}"
 
     try:
-        # Save uploaded image
+        # Save uploaded image temporarily
         with open(input_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         logging.info(f"Image saved at: {input_path}")
 
-        # Prepare request to HuggingFace Space
-        api_url = "https://rakibulbd030-old-photo-restoration.hf.space/api/predict"
-        payload = {
-            "data": [
-                input_path,  # file path
-                version,     # model version string
-                scale        # rescaling factor
-            ]
-        }
+        # Use gradio_client to enhance image
+        result = client.predict(
+            input_image=handle_file(input_path),
+            scale=scale,
+            enhance_mode=enhance_mode,
+            api_name="/enhance_image"
+        )
 
-        response = requests.post(api_url, json=payload)
+        output_url = result[0].get("url")
+        if not output_url:
+            raise Exception("No output image returned from API.")
+
+        # Fetch the enhanced image from URL
+        response = requests.get(output_url)
         response.raise_for_status()
 
-        result = response.json()
-        output_image_path = result.get("data", [None, None])[1]
-
-        if not output_image_path or not os.path.exists(output_image_path):
-            raise Exception("Output image not generated or path missing.")
-
-        # Return image as response
-        with open(output_image_path, "rb") as out_file:
-            image_bytes = out_file.read()
-
-        return Response(content=image_bytes, media_type="image/png")
+        return Response(content=response.content, media_type="image/png")
 
     except Exception as e:
         logging.error(f"Enhancement failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
     finally:
-        # Clean up input and output files
-        for path in [input_path]:
-            if os.path.exists(path):
-                os.remove(path)
+        # Cleanup input file
+        if os.path.exists(input_path):
+            os.remove(input_path)
