@@ -38,8 +38,8 @@ def root():
 @app.post("/enhance/")
 async def enhance_image(
     file: UploadFile = File(...),
-    upscale: float = Form(2),
-    codeformer_fidelity: float = Form(0.5),
+    upscale: float = Form(4),
+    codeformer_fidelity: float = Form(1),
     face_align: bool = Form(True),
     background_enhance: bool = Form(True),
     face_upsample: bool = Form(True),
